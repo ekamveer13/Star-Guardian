@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Star Guardian: Tactical Stability</title>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: 'Courier New', monospace; overflow: hidden; display: flex; flex-direction: row; height: 100vh; }
+        #shop-sidebar { width: 220px; padding: 20px; border-right: 2px solid #444; background: #0a0a0a; display: flex; flex-direction: column; gap: 12px; z-index: 10; }
+        #game-container { flex-grow: 1; display: flex; align-items: center; justify-content: center; position: relative; }
+        canvas { background: #000; border: 2px solid #333; box-shadow: 0 0 20px #0ff; max-height: 95vh; cursor: crosshair; }
+        .shop-btn { background: #111; color: #fff; border: 1px solid #444; padding: 10px; cursor: pointer; text-align: left; font-family: inherit; transition: 0.2s; font-size: 13px; }
+        .shop-btn:hover:not(:disabled) { border-color: #0ff; background: #1a1a1a; }
+        .shop-btn:disabled { opacity: 0.5; cursor: not-allowed; border-color: #500; }
+        .price { color: #ffd700; font-weight: bold; display: block; margin-top: 3px; }
+    </style>
+</head>
+<body>
+    <div id="shop-sidebar">
+        <div style="text-align:center; margin-bottom:5px;">
+            <span style="font-size:11px; color:#aaa;">WALLET</span><br>
+            <span id="coin-count" style="color:#ffd700; font-size:22px;">0</span>🪙
+        </div>
+        <button class="shop-btn" onclick="buyItem('repair', 50)"><b>REPAIR KIT</b><span class="price">50 🪙</span></button>
+        <button id="btn-double" class="shop-btn" onclick="buyItem('double', 300)"><b>DOUBLE SHOT</b><span id="price-double" class="price">300 🪙</span></button>
+        <button id="btn-charge" class="shop-btn" onclick="buyItem('charge', 200)"><b>SPECIAL CHARGER</b><span id="price-charge" class="price">200 🪙</span></button>
+        <button id="btn-magnet" class="shop-btn" onclick="buyItem('magnet', 150)"><b>ITEM MAGNET</b><span id="price-magnet" class="price">150 🪙</span></button>
+        <button id="btn-dodge" class="shop-btn" onclick="buyItem('dodge', 100)"><b>DODGE ROLL</b><span id="price-dodge" class="price">100 🪙</span></button>
+        <button id="btn-drone" class="shop-btn" onclick="buyItem('drone', 250)"><b>DRONE BUDDY</b><span id="price-drone" class="price">250 🪙</span></button>
+    </div>
+
+    <div id="game-container">
+        <canvas id="gameCanvas" width="700" height="750"></canvas>
+    </div>
+
+    <!-- Firebase integration -->
+    <script src="firebase.js"></script>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        let state = 'MENU', score = 0, level = 1, shake = 0, coins = parseInt(localStorage.getItem('sg_coins')) || 0;
+        let upgrades = { dodge: false, drone: false, magnet: false, double: false, charge: false };
+        let player = { x: 330, y: 600, hp: 100, energy: 100, special: 0, vx: 0, dash: 0, lastK: '', lastT: 0 };
+        let bullets = [], enemies = [], items = [], stars = [], explosions = [], enemyBullets = [], chainBolt = null, keys = {};
+        const nebulaColors = ["#000", "#00081a", "#0d001a", "#1a0000", "#001a0d", "#1a1300"];
+
+        function refreshUI() {
+            document.getElementById('coin-count').innerText = coins;
+            if(upgrades.double) { document.getElementById('price-double').innerText = "OWNED"; document.getElementById('btn-double').disabled = true; }
+            if(upgrades.charge) { document.getElementById('price-charge').innerText = "OWNED"; document.getElementById('btn-charge').disabled = true; }
+            if(upgrades.magnet) document.getElementById('btn-magnet').disabled = true;
+            if(upgrades.dodge) document.getElementById('btn-dodge').disabled = true;
+            if(upgrades.drone) document.getElementById('btn-drone').disabled = true;
+        }
+        refreshUI();
+
+        window.buyItem = (id, cost) => {
+            if (coins >= cost) {
+                if (id === 'repair' && player.hp < 100) player.hp = 100;
+                else if (!upgrades[id]) upgrades[id] = true;
+                else return;
+                coins -= cost; localStorage.setItem('sg_coins', coins); refreshUI(); sfx(800, 'sine', 0.2);
+            }
+        };
+
+        function sfx(f, t, d, v=0.05) {
+            const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+            o.type = t; o.frequency.setValueAtTime(f, audioCtx.currentTime);
+            g.gain.setValueAtTime(v, audioCtx.currentTime);
+            o.connect(g); g.connect(audioCtx.destination);
+            o.start(); o.stop(audioCtx.currentTime + d);
+        }
+
+        canvas.addEventListener('mousedown', () => { if (state !== 'PLAYING') resetGame(); });
+
+        function resetGame() {
+            state = 'PLAYING'; score = 0; level = 1; chainBolt = null;
+            player.hp = 100; player.energy = 100; player.special = 0; player.x = 330;
+            bullets = []; enemies = []; items = []; enemyBullets = []; explosions = [];
+            audioCtx.resume();
+        }
+
+        window.onkeydown = e => {
+            let k = e.key.toLowerCase(); keys[k] = true;
+            if(upgrades.dodge && (k === 'a' || k === 'd')) {
+                let now = Date.now();
+                if(k === player.lastK && (now - player.lastT) < 250) { player.vx = (k === 'a' ? -25 : 25); player.dash = 12; }
+                player.lastK = k; player.lastT = now;
+            }
+            if(k === 'q' && player.special >= 100 && state === 'PLAYING') {
+                player.special = 0; chainBolt = { x: player.x+20, y: player.y, timer: 240 }; sfx(400, 'square', 0.5);
+            }
+        };
+        window.onkeyup = e => keys[e.key.toLowerCase()] = false;
+
+        for(let i=0; i<80; i++) stars.push({ x: Math.random()*700, y: Math.random()*750, s: Math.random()*2+1 });
+
+        function update() {
+            if (state !== 'PLAYING') return;
+            const timeScale = player.hp < 25 ? 0.4 : 1.0;
+            level = Math.min(5, Math.floor(score / 500) + 1);
+
+            if (shake > 0) { ctx.setTransform(1,0,0,1, Math.random()*shake-shake/2, Math.random()*shake-shake/2); shake *= 0.85; }
+            else ctx.setTransform(1,0,0,1,0,0);
+
+            if (keys['a']) player.vx -= 0.8; if (keys['d']) player.vx += 0.8;
+            player.vx *= 0.9; player.x += player.vx;
+            player.x = Math.max(0, Math.min(660, player.x));
+            if(player.dash > 0) player.dash--;
+
+            // PASSIVE REGEN: restores roughly 2 HP every 3 seconds (0.01 per frame at 60fps)
+            if (player.hp < 100) player.hp += 0.01 * timeScale;
+           
+            player.energy = Math.min(100, player.energy + 0.4);
+            let chargeRate = upgrades.charge ? 0.12 : 0.06;
+            player.special = Math.min(100, player.special + chargeRate * timeScale);
+
+            if ((keys[' '] || keys['w']) && player.energy > 15 && Date.now() % 150 < 20) {
+                player.energy -= 12;
+                if (upgrades.double) bullets.push({x: player.x+5, y: player.y}, {x: player.x+30, y: player.y});
+                else bullets.push({x: player.x+18, y: player.y});
+                sfx(600, 'sine', 0.05);
+            }
+
+            if (Math.random() < (0.01 + level * 0.005) * timeScale) {
+                enemies.push({ x: Math.random()*660, y: -50, v: 1.1 + level * 0.3, hp: 1 });
+            }
+
+            // SPECIAL BOLT: Homing fix (searches for closest living enemy)
+            if (chainBolt) {
+                chainBolt.timer -= timeScale;
+                let target = enemies.find(e => e.y > 0 && e.hp > 0);
+                if (target) {
+                    chainBolt.x += (target.x - chainBolt.x) * 0.2;
+                    chainBolt.y += (target.y - chainBolt.y) * 0.2;
+                    if (Math.abs(chainBolt.x - target.x) < 15 && Math.abs(chainBolt.y - target.y) < 15) target.hp = 0;
+                } else chainBolt.y -= 10;
+                if (chainBolt.timer <= 0) chainBolt = null;
+            }
+
+            for (let ei = enemies.length - 1; ei >= 0; ei--) {
+                let e = enemies[ei]; e.y += e.v * timeScale;
+                for (let bi = bullets.length - 1; bi >= 0; bi--) {
+                    if (bullets[bi].x > e.x && bullets[bi].x < e.x + 40 && bullets[bi].y < e.y + 40) {
+                        e.hp--; bullets.splice(bi, 1);
+                        if (e.hp <= 0) {
+                            let rand = Math.random();
+                            if (rand < 0.15) items.push({x: e.x+10, y: e.y+10, t: 'C'});
+                            else if (rand < 0.20) items.push({x: e.x+10, y: e.y+10, t: 'H'});
+                            else if (rand < 0.25) items.push({x: e.x+10, y: e.y+10, t: 'E'});
+                            enemies.splice(ei, 1); score += 10;
+                        }
+                        break;
+                    }
+                }
+                if (e && (e.y > 750 || (Math.abs(player.x - e.x) < 30 && Math.abs(player.y - e.y) < 30))) {
+                    if (player.dash <= 0) player.hp -= 20; enemies.splice(ei, 1); shake = 10;
+                }
+            }
+
+            bullets.forEach((b, i) => { b.y -= 15; if (b.y < 0) bullets.splice(i,1); });
+
+            items.forEach((it, i) => {
+                it.y += 2.5;
+                if (upgrades.magnet && Math.hypot(player.x+20-it.x, player.y+20-it.y) < 180) {
+                    it.x += (player.x+20-it.x)*0.18; it.y += (player.y+20-it.y)*0.18;
+                }
+                if (Math.abs(player.x - it.x) < 40 && Math.abs(player.y - it.y) < 40) {
+                    if (it.t === 'C') { coins += 5; refreshUI(); localStorage.setItem('sg_coins', coins); }
+                    else if (it.t === 'H') player.hp = Math.min(100, player.hp + 20);
+                    else if (it.t === 'E') player.energy = 100;
+                    items.splice(i,1); sfx(1000, 'sine', 0.1);
+                }
+            });
+
+            stars.forEach(s => { s.y += s.s * timeScale; if(s.y > 750) s.y = 0; });
+            if (player.hp <= 0) state = 'GAMEOVER';
+        }
+
+        function draw() {
+            ctx.fillStyle = nebulaColors[level] || "#000"; ctx.fillRect(-50, -50, 800, 850);
+            ctx.fillStyle = "#fff"; stars.forEach(s => ctx.fillRect(s.x, s.y, s.s/2, s.s/2));
+            if (state === 'PLAYING') {
+                ctx.font = "35px serif"; if(player.dash > 0) ctx.globalAlpha = 0.4;
+                ctx.fillText('🚀', player.x, player.y + 35); ctx.globalAlpha = 1.0;
+                enemies.forEach(e => ctx.fillText('👾', e.x, e.y + 35));
+                items.forEach(it => ctx.fillText(it.t === 'C' ? '🪙' : (it.t === 'H' ? '💚' : '⚡'), it.x, it.y + 30));
+                if (chainBolt) { ctx.fillStyle = '#f0f'; ctx.beginPath(); ctx.arc(chainBolt.x+20, chainBolt.y+20, 12, 0, 7); ctx.fill(); }
+                ctx.fillStyle = '#0ff'; bullets.forEach(b => ctx.fillRect(b.x, b.y, 4, 15));
+               
+                ctx.setTransform(1,0,0,1,0,0);
+                let uX = 250, uY = 20;
+                ctx.fillStyle = '#0f0'; ctx.fillRect(uX, uY, player.hp*2, 8);
+                ctx.fillStyle = '#0ff'; ctx.fillRect(uX, uY+12, player.energy*2, 8);
+                ctx.fillStyle = '#f0f'; ctx.fillRect(uX, uY+24, player.special*2, 8);
+                ctx.fillStyle = '#fff'; ctx.font='14px Courier';
+                ctx.fillText(`LVL ${level} | SCORE ${score}`, 20, 30);
+            } else {
+                ctx.fillStyle = '#0ff'; ctx.textAlign = 'center'; ctx.font = '30px Courier';
+                ctx.fillText(state === 'MENU' ? 'STAR GUARDIAN' : 'MISSION FAILED', 350, 350);
+                ctx.font = '16px Courier'; ctx.fillText('CLICK TO START', 350, 400);
+            }
+            update(); requestAnimationFrame(draw);
+// This removes all enemies that are dead or have no HP from the game
+enemies = enemies.filter(enemy => enemy.hp > 0 && !enemy.dead);
+
+        }
+        draw();
+    </script>
+</body>
+</html>
